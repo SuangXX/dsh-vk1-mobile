@@ -1,0 +1,419 @@
+--- /root/dsh/release/dsh-plugin/widget.js	2026-10-06 09:48:02.000000000 +0000
++++ /root/dsh/ycts/YCTS-otree-VK-1-8628a8f/dsh-plugin/widget.js	2026-10-06 19:08:57.516232162 +0000
+@@ -104,7 +104,11 @@
+   // 预设之外还有菜单里的「自定义」px 输入框（上游同样是「预设 + 自定义」的形状）。
+   // 挂件是分辨率无关的等比布局，落在这个区间里都能正确排版。
+   // 默认仍是上游大杯 454：没手动调过尺寸的安装不会被这次改预设悄悄缩小。
+-  var DEFAULT_SIZE = 454
++  // 手机适配（本机改动）：窄屏 WebView 的 CSS 宽通常只有 400-520px，
++  // 上游默认的 454 会直接占满整屏、把聊天内容全压住。桌面仍维持 454。
++  var DEFAULT_SIZE = isNarrow()
++    ? clamp(Math.round((window.innerWidth || 1280) * 0.36), 128, 192)
++    : 454
+   var MIN_SIZE = 96
+   var MAX_SIZE = 1200
+   var DEMOS = [0.05, 0.1, 0.2, 0.5, 1.0]
+@@ -117,7 +121,15 @@
+   var SUCK_ACCEL = 960.0
+   var SUCK_MAX = 2400.0
+   var GRAVITY = 2100.0
+-  var RESTITUTION = 0.5
++  // 物理尺度（本机改动）：上游全部物理常量都是「454px 挂件 + 桌面视口」量纲的。
++  // 挂件缩小后若不按比例缩放，重力相对屏幕会大好几倍 —— 盆掉得急、反弹高度
++  // 只剩三分之一，观感就是"弹性弱"。速度/加速度 ∝ 长度尺度；
++  // 摩擦(1/s) 与弹性系数(无量纲) 不缩放。
++  function physScale() {
++    return Math.max(0.15, Math.min(1, state.size / 454))
++  }
++  // 落地弹性：上游 0.5，这里略提到 0.6，让弹跳看得见（本机改动）。
++  var RESTITUTION = 0.6
+   var AIR_DRAG = 0.30
+   var SLIDE_FRICTION = 1.40
+   var SLIDE_STOP = 14.0
+@@ -132,13 +144,27 @@
+   var IRON_FADE = 0.45
+   var BTN_GRACE_MS = 1500
+ 
+-  var POS_KEY = 'dsh-vk1-pos'
++  // 手机适配（本机改动）：换 key 让旧锚点失效，从而落到下面的手机默认位置。
++  var POS_KEY = 'dsh-vk1-pos-v3'
+   var SIZE_KEY = 'dsh-vk1-size'
+   var GAP_KEY = 'dsh-vk1-gap'
+   var SOUND_KEY = 'dsh-vk1-sound'
+ 
+   function round4(v) { return Math.round(v * 10000) / 10000 }
+   function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v) }
++  // 手机（窄屏）判定：700px 足以分开手机 WebView 与桌面窗口。
++  function isNarrow() {
++    try { return (window.innerWidth || document.documentElement.clientWidth || 1280) < 700 } catch (err) { return false }
++  }
++  // 手机适配（本机改动）：Android 全面屏的手势区就在视口最底部，道具（米饭盆 / 铁盆）
++  // 落到那里会和系统上滑手势抢触摸 —— 系统优先级更高，于是必然误触。
++  // 把"地面"整体抬高一个安全边距：手势条约 24dp，取视口高度的 3%，夹在 18-40px。
++  function bottomInset() {
++    try {
++      if (!isNarrow()) return 0
++      return Math.min(40, Math.max(18, Math.round((window.innerHeight || 800) * 0.03)))
++    } catch (err) { return 0 }
++  }
+   function amountText(v) { return String(Math.round(v * 10000) / 10000) }
+   function fmt2(v) { return (Math.round(v * 100) / 100).toFixed(2) }
+   function rnd(a, b) { return a + Math.random() * (b - a) }
+@@ -474,7 +500,7 @@
+       left: 0,
+       top: 0,
+       right: window.innerWidth || document.documentElement.clientWidth || 1280,
+-      bottom: window.innerHeight || document.documentElement.clientHeight || 800,
++      bottom: (window.innerHeight || document.documentElement.clientHeight || 800) - bottomInset(),
+     }
+   }
+   function bowlEl(url, width, height) {
+@@ -530,7 +556,7 @@
+       artW: d.w, artH: d.h, url: RICE_URL, R: R,
+       X: vs.right - R * 1.2 - state.bowls.length * R * 0.5,
+       Y: vs.top - R * 1.2,
+-      VX: -120, VY: 40,
++      VX: -120 * physScale(), VY: 40 * physScale(),
+       maxBounces: bouncesForDrop(vs.bottom - vs.top),
+       el: null,
+     })
+@@ -679,14 +705,38 @@
+           }
+           continue
+         }
++        // 受撞偏移（本机改动）：扣头铁盆的位置每帧被重置到头顶、速度也被清零，
++        // 碰撞给它的位移只有一帧（16ms），肉眼看不见 —— 所以单独维护一个带阻尼
++        // 的偏移 hitX/hitY，被白饭砸到时歪一下再弹回，看得见。
++        if (r.hitVX || r.hitVY || r.hitX || r.hitY) {
++          r.hitX = (r.hitX || 0) + (r.hitVX || 0) * dt
++          r.hitY = (r.hitY || 0) + (r.hitVY || 0) * dt
++          var hitDamp = Math.max(0, 1 - 18 * dt)
++          r.hitVX = (r.hitVX || 0) * hitDamp
++          r.hitVY = (r.hitVY || 0) * hitDamp
++          var hitSpring = Math.max(0, 1 - 16 * dt)
++          r.hitX *= hitSpring
++          r.hitY *= hitSpring
++          // 位移上限（本机改动）：不加这个，连续几帧的冲量会攒出几十像素，
++          // 铁盆直接飞离头顶。上限取挂件尺寸的 5%（130px 挂件 ≈ 6.5px）。
++          var maxOff = Math.max(3, state.size * 0.05)
++          if (r.hitX > maxOff) { r.hitX = maxOff; r.hitVX = 0 }
++          if (r.hitX < -maxOff) { r.hitX = -maxOff; r.hitVX = 0 }
++          if (r.hitY > maxOff) { r.hitY = maxOff; r.hitVY = 0 }
++          if (r.hitY < -maxOff) { r.hitY = -maxOff; r.hitVY = 0 }
++          if (Math.abs(r.hitX) < 0.3) r.hitX = 0
++          if (Math.abs(r.hitY) < 0.3) r.hitY = 0
++          if (Math.abs(r.hitVX) < 1) r.hitVX = 0
++          if (Math.abs(r.hitVY) < 1) r.hitVY = 0
++        }
+         if (r.headFalling) {
+           r.headY += (r.headTarget - r.headY) * Math.min(1.0, dt * 9.0)
+           if (Math.abs(r.headY - r.headTarget) < 0.6) { r.headY = r.headTarget; r.headFalling = false }
+-          r.Y = r.headY
++          r.Y = r.headY + (r.hitY || 0)
+         } else {
+-          r.Y = a.y
++          r.Y = a.y + (r.hitY || 0)
+         }
+-        r.X = a.x
++        r.X = a.x + (r.hitX || 0)
+         r.VX = 0; r.VY = 0; r.squish = 0; r.rot = 0; r.grounded = false
+         r.headT += dt
+         continue
+@@ -701,7 +751,8 @@
+         // the floor registers a brand-new bounce — and restarts the Q-bounce squash —
+         // on every single frame. That is the twitch seen on landing.
+         var vBefore = r.VY
+-        r.VY += GRAVITY * dt
++        // 尺度折中：完全按 k 缩放会显得重力太弱（实测反馈），取 sqrt(k)。
++        r.VY += GRAVITY * Math.sqrt(physScale()) * dt
+         r.VX *= (1.0 - AIR_DRAG * dt)
+         r.X += r.VX * dt
+         r.Y += r.VY * dt
+@@ -713,7 +764,7 @@
+         if (r.Y >= floor) {
+           r.Y = floor
+           var impact = vBefore > 0 ? vBefore : 0
+-          var slide = Math.abs(r.VX) > SLIDE_STOP
++          var slide = Math.abs(r.VX) > SLIDE_STOP * physScale()
+           if (slide) r.VX *= 0.92
+           r.VY = -impact * RESTITUTION
+           if (impact > 90 && r.bounces < r.maxBounces) {
+@@ -727,7 +778,7 @@
+         }
+         if (!r.grounded && r.Y >= floor - 0.5 && Math.abs(r.VY) < 45) {
+           r.VX *= (1.0 - SLIDE_FRICTION * dt)
+-          if (Math.abs(r.VX) <= SLIDE_STOP) { r.VX = 0; r.grounded = true; r.rot = 0 }
++          if (Math.abs(r.VX) <= SLIDE_STOP * physScale()) { r.VX = 0; r.grounded = true; r.rot = 0 }
+         }
+         if (r.X < left) { r.X = left; r.VX = Math.abs(r.VX) * 0.5 }
+         if (r.X > right) { r.X = right; r.VX = -Math.abs(r.VX) * 0.5 }
+@@ -745,7 +796,9 @@
+     for (var a2 = 0; a2 < state.bowls.length; a2++) {
+       for (var b2 = a2 + 1; b2 < state.bowls.length; b2++) {
+         var ra = state.bowls[a2], rb = state.bowls[b2]
+-        if (ra.fed || rb.fed || ra.onHead || rb.onHead) continue
++        // 上游只跳过已吃掉的（Fed）；原先这里还跳过了 onHead，
++        // 导致米饭盆直接穿过扣在头上的铁盆（实测现象）。
++        if (ra.fed || rb.fed) continue
+         var dx = rb.X - ra.X, dy = rb.Y - ra.Y
+         var d = Math.sqrt(dx * dx + dy * dy) || 0.001
+         var minD = ra.R + rb.R
+@@ -760,11 +813,28 @@
+         rb.X += nx * push * 2 * bw; rb.Y += ny * push * 2 * bw
+         var va = ra.VX * nx + ra.VY * ny
+         var vb = rb.VX * nx + rb.VY * ny
+-        if (va - vb > 0 && !aFixed && !bFixed) {
+-          var imp = (va - vb) * 0.55
+-          ra.VX -= imp * nx; ra.VY -= imp * ny
+-          rb.VX += imp * nx; rb.VY += imp * ny
++        // 碰撞反弹（本机改动）：上游是 0.55 的「条件性」交换，只处理迎面接近 ——
++        // 白饭垂直砸在静止铁盆上时相对速度不满足该条件，于是只做位置分离：
++        // 观感就是「弹开了但不反弹、铁盆也不回头」。这里改成无条件按接近速度弹开，
++        // 并清掉被撞一方的 grounded，让它真能被撞动、触地后再弹起来。
++        var rel = Math.abs(va - vb)
++        var imp = rel * 0.9
++        if (!aFixed) {
++          if (ra.onHead) {
++            ra.hitVX = (ra.hitVX || 0) - imp * nx * 0.5
++            ra.hitVY = (ra.hitVY || 0) - imp * ny * 0.5
++            state.headSquashT = 0
++          } else { ra.VX -= imp * nx; ra.VY -= imp * ny }
++        }
++        if (!bFixed) {
++          if (rb.onHead) {
++            rb.hitVX = (rb.hitVX || 0) + imp * nx * 0.5
++            rb.hitVY = (rb.hitVY || 0) + imp * ny * 0.5
++            state.headSquashT = 0
++          } else { rb.VX += imp * nx; rb.VY += imp * ny }
+         }
++        if (!aFixed && !ra.onHead) ra.grounded = false
++        if (!bFixed && !rb.onHead) rb.grounded = false
+       }
+     }
+   }
+@@ -885,7 +955,7 @@
+         b.beingSucked = true
+         var dx = G.x - b.X, dy = G.y - b.Y
+         var d = Math.sqrt(dx * dx + dy * dy)
+-        b.suckSpeed = Math.min(SUCK_MAX, (b.suckSpeed || 0) + SUCK_ACCEL * dt)
++        b.suckSpeed = Math.min(SUCK_MAX * physScale(), (b.suckSpeed || 0) + SUCK_ACCEL * physScale() * dt)
+         if (d <= Math.max(12, b.R) || d < 0.001) { onRiceFed(b); continue }
+         var step = Math.min(d, b.suckSpeed * dt)
+         b.X += dx / d * step
+@@ -1384,8 +1454,24 @@
+   function applyAnchorPos() {
+     try {
+       var a = JSON.parse(localStorage.getItem(POS_KEY) || 'null')
+-      if (!a || a.v !== 2 || (a.hAnchor !== 'left' && a.hAnchor !== 'right') || typeof a.hDist !== 'number' ||
+-          (a.vAnchor !== 'top' && a.vAnchor !== 'bottom') || typeof a.vDist !== 'number') return false
++      var bad = !a || a.v !== 2 || (a.hAnchor !== 'left' && a.hAnchor !== 'right') || typeof a.hDist !== 'number' ||
++          (a.vAnchor !== 'top' && a.vAnchor !== 'bottom') || typeof a.vDist !== 'number'
++      // 手机适配（本机改动）：没存过锚点、或存的就是「左上角贴 0」这种没动过的默认时，
++      // 改成左下角留 12px 边距 —— 窄屏上左上角正好压住聊天标题区。
++      var untouched = !bad && a.hAnchor === 'left' && a.vAnchor === 'top' && a.hDist <= 4 && a.vDist <= 4
++      if (bad || untouched) {
++        if (!isNarrow()) return false
++        var vp0 = viewport()
++        var s0 = state.size
++        // 右下角，并在底部让出 DSH 输入框的高度：贴底会正好压住发送按钮。
++        var bottomGap = Math.min(180, Math.round(vp0.h * 0.16))
++        state.left = clamp(vp0.w - 12 - s0, 0, Math.max(0, vp0.w - s0))
++        state.top = clamp(vp0.h - bottomGap - s0, 0, Math.max(0, vp0.h - s0))
++        state.h = 'right'; state.hOff = 0
++        state.v = 'bottom'; state.vOff = 0
++        express(); layout()
++        return true
++      }
+       var vp = viewport()
+       var w = state.size, h = state.size
+       var effectiveRightDist = a.hAnchor === 'right' ? a.hDist + (state.scrollGapOn ? rightGap() : 0) : a.hDist
+@@ -1403,6 +1489,73 @@
+   }
+ 
+   // ------------------------------------------------------ drag & snapping ---
++  // 手机适配（本机改动）：挂件的指针事件挂在 document 上、事件目标不是挂件本身，
++  // 没有 touch-action:none 时浏览器会把"按住拖动"识别成页面滚动，随即发 pointercancel，
++  // 结果就是手机上根本拖不动（onUp 走到"没移动"分支，还会顺手刷新一次余额）。
++  // 拖动 / 抓盆期间临时禁掉页面触摸滚动，松手恢复。
++  var savedTouchAction = null
++  // 上游 dsh_pet.ps1 的松手测速：ThrowWindowMs=150 窗口内逐段速度取中位数，
++  // 低于 ThrowMinSpeed 视为"放置"，并做 X/Y 限幅。插件原先只取最后一帧瞬时值
++  // 再乘 0.35，手一停就归零 —— 观感就是"没有惯性"。
++  var THROW_WINDOW_MS = 150
++  var THROW_MAX_SAMPLES = 12
++  var THROW_MIN_SPEED = 12
++  var THROW_MAX_SPEED = 4200
++  var THROW_MAX_SPEED_Y = 1700
++  function pushThrowSample(x, y) {
++    var arr = state.throwSamples || (state.throwSamples = [])
++    arr.push({ t: performance.now(), x: x, y: y })
++    if (arr.length > THROW_MAX_SAMPLES) arr.shift()
++  }
++  function medianOf(nums) {
++    if (!nums.length) return 0
++    var a = nums.slice().sort(function (p, q) { return p - q })
++    var m = a.length >> 1
++    return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2
++  }
++  function throwVelocity() {
++    var arr = state.throwSamples || []
++    if (arr.length < 2) return { x: 0, y: 0 }
++    var cutoff = arr[arr.length - 1].t - THROW_WINDOW_MS
++    var first = 0
++    while (first < arr.length - 1 && arr[first].t < cutoff) first++
++    var dxs = [], dys = []
++    for (var i = first; i < arr.length - 1; i++) {
++      var dt = (arr[i + 1].t - arr[i].t) / 1000
++      if (dt < 0.008) continue
++      dxs.push((arr[i + 1].x - arr[i].x) / dt)
++      dys.push((arr[i + 1].y - arr[i].y) / dt)
++    }
++    if (!dxs.length) return { x: 0, y: 0 }
++    return { x: medianOf(dxs), y: medianOf(dys) }
++  }
++  function capSpeed(v, max) { return v > max ? max : (v < -max ? -max : v) }
++  function releaseVelocity() {
++    var v = throwVelocity()
++    var speed = Math.sqrt(v.x * v.x + v.y * v.y)
++    if (speed < THROW_MIN_SPEED) return { x: 0, y: 0 }
++    // 上游的 4200 / 1700 是「454px 挂件 + 桌面视口」下的量纲。
++    // 挂件变小后同样数值相对屏幕会大好几倍，于是轻轻一甩就飞没影 ——
++    // 按 state.size / 454 等比缩放限幅，手感才对得上。
++    var k = Math.max(0.15, Math.min(1, state.size / 454))
++    return { x: capSpeed(v.x, THROW_MAX_SPEED * k), y: capSpeed(v.y, THROW_MAX_SPEED_Y * k) }
++  }
++
++  function lockTouchScroll() {
++    try {
++      if (savedTouchAction === null) savedTouchAction = document.documentElement.style.touchAction || ""
++      document.documentElement.style.touchAction = "none"
++    } catch (err) {}
++  }
++  function unlockTouchScroll() {
++    try {
++      if (savedTouchAction !== null) {
++        document.documentElement.style.touchAction = savedTouchAction
++        savedTouchAction = null
++      }
++    } catch (err) {}
++  }
++
+   function addDragListeners() {
+     document.addEventListener('pointermove', onMove, true)
+     document.addEventListener('pointerup', onUp, true)
+@@ -1443,6 +1596,8 @@
+       bowl.VX = 0
+       bowl.VY = 0
+       state.grab = { bowl: bowl, dx: bowl.X - e.clientX, dy: bowl.Y - e.clientY, moved: false, x: e.clientX, y: e.clientY }
++      state.throwSamples = [{ t: performance.now(), x: e.clientX, y: e.clientY }]
++      lockTouchScroll()
+       addDragListeners()
+       return
+     }
+@@ -1451,6 +1606,21 @@
+     try { e.preventDefault(); e.stopPropagation() } catch (err) {}
+     state.dragWidget = { x: e.clientX, y: e.clientY, left: state.left, top: state.top, moved: false }
+     root.classList.add('dshvk1-dragging')
++    lockTouchScroll()
++    // 手机适配（本机改动）：触摸端没有 hover，那个悬浮菜单按钮不会出现，
++    // 右键菜单在 WebView 里也不一定触发，所以补一条长按开菜单。
++    var lpX = e.clientX, lpY = e.clientY
++    if (state.longPressTimer) clearTimeout(state.longPressTimer)
++    state.longPressTimer = setTimeout(function () {
++      state.longPressTimer = null
++      var d0 = state.dragWidget
++      if (!d0 || d0.moved) return
++      state.dragWidget = null
++      root.classList.remove('dshvk1-dragging')
++      removeDragListeners()
++      unlockTouchScroll()
++      openMenu(lpX, lpY)
++    }, 480)
+     addDragListeners()
+   }
+   function onMove(e) {
+@@ -1462,6 +1632,7 @@
+       var ny = e.clientY + g.dy
+       b.sampleVX = (nx - b.X) / 0.016
+       b.sampleVY = (ny - b.Y) / 0.016
++      pushThrowSample(e.clientX, e.clientY)
+       b.X = nx
+       b.Y = ny
+       renderBowls()
+@@ -1472,12 +1643,15 @@
+     var dx = e.clientX - d.x
+     var dy = e.clientY - d.y
+     if (dx * dx + dy * dy >= 9) d.moved = true
++    if (d.moved && state.longPressTimer) { clearTimeout(state.longPressTimer); state.longPressTimer = null }
+     var vp = viewport()
+     state.left = clamp(d.left + dx, 0, Math.max(0, vp.w - state.size - rightGap()))
+     state.top = clamp(d.top + dy, 0, Math.max(0, vp.h - state.size))
+     express()
+   }
+   function onUp(e) {
++    if (state.longPressTimer) { clearTimeout(state.longPressTimer); state.longPressTimer = null }
++    unlockTouchScroll()
+     var g = state.grab
+     if (g) {
+       var b = g.bowl
+@@ -1488,8 +1662,9 @@
+         if (ironOnHead(b)) {
+           attachIronPot(b)
+         } else {
+-          b.VX = b.sampleVX * 0.35
+-          b.VY = b.sampleVY * 0.35
++          var rv = releaseVelocity()
++          b.VX = rv.x
++          b.VY = rv.y
+           var floor = viewportRect().bottom
+           b.maxBounces = bouncesForDrop(Math.max(0, floor - b.Y))
+           b.bounces = 0
+@@ -1498,8 +1673,9 @@
+       } else if (riceOnGirl(b)) {
+         onRiceFed(b)
+       } else {
+-        b.VX = b.sampleVX * 0.35
+-        b.VY = b.sampleVY * 0.35
++        var rv = releaseVelocity()
++        b.VX = rv.x
++        b.VY = rv.y
+         var fl = viewportRect().bottom
+         b.maxBounces = bouncesForDrop(Math.max(0, fl - b.Y))
+         b.bounces = 0
+@@ -1558,6 +1734,27 @@
+   document.addEventListener('contextmenu', onContextMenu, true)
+   window.addEventListener('resize', onResize)
+ 
++  // 手机适配（本机改动，第二轮）：上一轮在 pointerdown 里改 touch-action 是无效的 ——
++  // touch-action 在「手势开始时」求值，那时浏览器已经决定这是页面滚动，随后照样发
++  // pointercancel，拖动序列被掐断（实测：长按能开菜单，一拖就不动）。
++  // 可靠时机只有 touchstart：命中挂件就 preventDefault，把这串触摸留给拖动自己用。
++  document.addEventListener('touchstart', function (e) {
++    if (state.menuOpen) return
++    if (!e.touches || e.touches.length !== 1) return
++    if (e.target && e.target.closest && e.target.closest('.dshvk1-menu')) return
++    var t0 = e.touches[0]
++    if (bowlAt(t0.clientX, t0.clientY) || isHit(t0)) {
++      try { e.preventDefault() } catch (err) {}
++    }
++  }, { capture: true, passive: false })
++  // 第二道保险：拖动/抓盆进行中，持续挡掉触摸默认行为（滚动/缩放），
++  // 免得某一次手势在第一个 touchstart 判定之外漏过去。
++  document.addEventListener('touchmove', function (e) {
++    if (state.dragWidget || state.grab) {
++      try { e.preventDefault() } catch (err) {}
++    }
++  }, { capture: true, passive: false })
++
+   // ---------------------------------------------------------------- menu ----
+   var btnOnSolid = false
+   var btnHideTimer = null
+@@ -1730,6 +1927,8 @@
+   // ----------------------------------------------------------------- start ---
+   try {
+     var savedSize = parseInt(localStorage.getItem(SIZE_KEY) || '', 10)
++    // 手机适配（本机改动）：窄屏上「继承来的 454」等于从没手动调过，视为未设置。
++    if (savedSize === 454 && DEFAULT_SIZE !== 454) savedSize = NaN
+     if (isFinite(savedSize) && savedSize >= MIN_SIZE && savedSize <= MAX_SIZE) state.size = savedSize
+     var g = JSON.parse(localStorage.getItem(GAP_KEY) || 'null')
+     if (g) { state.scrollGapOn = !!g.on; state.scrollGapPx = typeof g.px === 'number' && g.px > 0 ? Math.round(g.px) : 0 }
